@@ -1,0 +1,36 @@
+{
+  "name": "shopping-assistant-agents",
+  "version": "1.0.0",
+  "description": "LangGraph agents for shopping assistant",
+  "main": "src/agents/supervisor.ts",
+  "scripts": {
+    "dev": "npx @langchain/langgraph-cli dev",
+    "build": "npx @langchain/langgraph-cli build .",
+    "deploy": "npx @langchain/langgraph-cli deploy --wait",
+    "deploy:prod": "npx @langchain/langgraph-cli deploy --tag production --wait",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "lint": "eslint src --ext ts,tsx",
+    "format": "prettier --write \"src/**/*.ts\""
+  },
+  "dependencies": {
+    "@langchain/core": "^0.3.15",
+    "@langchain/langgraph": "^0.4.9",
+    "@langchain/openai": "^0.3.15",
+    "@auth0/ai-langchain": "^3.4.0",
+    "langchain": "^0.3.15",
+    "zod": "^3.24.2",
+    "zod-to-json-schema": "^3.23.2"
+  },
+  "devDependencies": {
+    "@langchain/langgraph-cli": "^0.0.66",
+    "@types/node": "^22.13.4",
+    "typescript": "5.7.3",
+    "vitest": "^1.0.0",
+    "eslint": "^9.20.1",
+    "prettier": "^3.4.2"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
