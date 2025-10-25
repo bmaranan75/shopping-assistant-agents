@@ -1,18 +1,12 @@
 {
   "dependencies": ["."],
   "graphs": {
-    "supervisor": "./src/lib/agents/supervisor.ts:supervisorGraph",
-    "catalog": "./src/lib/agents/catalog-agent.ts:catalogGraph",
-    "cart_and_checkout": "./src/lib/agents/cart-and-checkout-agent.ts:cartAndCheckoutGraph",
-    "payment": "./src/lib/agents/payment-agent.ts:paymentGraph",
-    "deals": "./src/lib/agents/deals-agent.ts:dealsGraph"
+    "supervisor": "./src/agents/supervisor.ts:supervisorGraph",
+    "catalog": "./src/agents/catalog-agent.ts:catalogGraph",
+    "cart_and_checkout": "./src/agents/cart-and-checkout-agent.ts:cartAndCheckoutGraph",
+    "payment": "./src/agents/payment-agent.ts:paymentGraph",
+    "deals": "./src/agents/deals-agent.ts:dealsGraph"
   },
-  "env": ".env.local",
-  "node_version": "20",
-  "mcp": {
-    "enabled": true,
-    "server": "./src/mcp/server.ts",
-    "api_prefix": "/api/mcp/agents",
-    "transport": "stdio"
-  }
+  "env": ".env",
+  "node_version": "20"
 }
