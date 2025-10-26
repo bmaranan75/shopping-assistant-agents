@@ -28,6 +28,12 @@ import { HumanMessage, SystemMessage, AIMessage } from '@langchain/core/messages
 import { planner, invalidatePlannerCacheByPrefix } from './planner';
 import { MIN_PLANNER_CONFIDENCE, MIN_CONTINUATION_CONFIDENCE } from './constants';
 
+// Import specialized agent graphs for direct invocation
+import { catalogGraph } from './catalog-agent';
+import { cartAndCheckoutGraph } from './cart-and-checkout-agent';
+import { dealsGraph } from './deals-agent';
+import { paymentGraph } from './payment-agent';
+
 // Import from refactored modules
 import type { AnnotatedMessage, AgentRole } from './supervisor/types';
 import { SupervisorState } from './supervisor/state';
@@ -136,49 +142,9 @@ export const routePlanner = (state: typeof SupervisorState.State) => {
 };
 
 // LangGraph server configuration
-const LANGGRAPH_SERVER_URL = 'http://localhost:2024';
 
-import LangGraphClient, { conversationThreadMap, conversationThreadTimestamps, AgentCallOptions, AgentCallResult } from './langgraphClient';
 
-// Clean up old conversation mappings (prevent memory leaks)
-// Use TTL-based eviction to avoid clearing active sessions unexpectedly.
-setInterval(() => {
-  const TTL = 60 * 60 * 1000; // 1 hour
-  const now = Date.now();
-  for (const [convId, ts] of conversationThreadTimestamps.entries()) {
-    if (now - ts > TTL) {
-      conversationThreadTimestamps.delete(convId);
-      conversationThreadMap.delete(convId);
-      console.log(`[supervisor] Evicted stale conversation: ${convId}`);
-    }
-  }
-  // Occasional logging for visibility
-  if (conversationThreadMap.size > 0) {
-    console.log(`[supervisor] Active thread mappings: ${conversationThreadMap.size}`);
-  }
-}, 10 * 60 * 1000); // run every 10 minutes
 
-// Create a singleton LangGraphClient to reuse connections across calls
-const globalLangGraphClient = new LangGraphClient(LANGGRAPH_SERVER_URL);
-
-// Internal mutable implementation reference so tests can inject mocks
-let callLangGraphAgentImpl: (opts: AgentCallOptions) => Promise<AgentCallResult> = async (opts) => {
-  return globalLangGraphClient.callAgentWithStream(opts);
-};
-
-// Public exported wrapper (immutable binding) that delegates to the mutable impl
-export async function callLangGraphAgent(opts: AgentCallOptions): Promise<AgentCallResult> {
-  return callLangGraphAgentImpl(opts);
-}
-
-// Test helper to override the internal LangGraph agent caller
-export function __setCallLangGraphAgentForTests(fn: any) {
-  callLangGraphAgentImpl = fn;
-}
-
-export function __resetCallLangGraphAgentForTests() {
-  callLangGraphAgentImpl = async (opts: AgentCallOptions) => globalLangGraphClient.callAgentWithStream(opts);
-}
 
 // Re-export utility functions from modules for backwards compatibility
 export { 
@@ -694,7 +660,7 @@ async function catalogNode(state: typeof SupervisorState.State) {
 
   // Build compact context for the catalog agent and send reduced history
   const catalogContext = buildAgentContextMessage(messages as AnnotatedMessage[], 'catalog', messageContent);
-  const result = await callLangGraphAgent({ agentId: 'catalog', message: catalogContext, userId: userId || 'default-user', conversationId: conversationId || `conv-${userId || 'default'}-session` });
+  const result = await catalogGraph.invoke({ messages: [new HumanMessage(catalogContext)] });
 
   // Annotate returned messages as coming from the catalog assistant
   const annotatedResponses = (result.messages || []).map((m: any) => annotateMessage(m as AIMessage, 'assistant', 'catalog'));
@@ -822,7 +788,7 @@ export async function cartAndCheckoutNode(state: typeof SupervisorState.State) {
 
   const fullCartMessage = `${cartContext}\n\n${messageToAgent}${structuredInstruction}`;
   
-  const result = await callLangGraphAgent({ agentId: 'cart_and_checkout', message: fullCartMessage, userId: userId || 'default-user', conversationId: conversationId || `conv-${userId || 'default'}-session` });
+  const result = await cartAndCheckoutGraph.invoke({ messages: [new HumanMessage(fullCartMessage)] });
 
   const annotatedResponses = (result.messages || []).map((m: any) => annotateMessage(m as AIMessage, 'assistant', 'cart_and_checkout'));
   
@@ -1146,7 +1112,7 @@ async function dealsNode(state: typeof SupervisorState.State) {
   }
   
   const dealsContext = buildAgentContextMessage(messages as AnnotatedMessage[], 'deals', messageToAgent);
-  const result = await callLangGraphAgent({ agentId: 'deals', message: dealsContext, userId: userId || 'default-user', conversationId: conversationId || `conv-${userId || 'default'}-session` });
+  const result = await dealsGraph.invoke({ messages: [new HumanMessage(dealsContext)] });
   const annotatedResponses = (result.messages || []).map((m: any) => annotateMessage(m as AIMessage, 'assistant', 'deals'));
   // Analyze response for deal confirmation needs
   const responseMessages = annotatedResponses;
@@ -1366,7 +1332,7 @@ async function paymentNode(state: typeof SupervisorState.State) {
     : '';
   
   const paymentContext = buildAgentContextMessage(messages as AnnotatedMessage[], 'payment', messageContent);
-  const result = await callLangGraphAgent({ agentId: 'payment', message: paymentContext, userId: userId || 'default-user', conversationId: conversationId || `conv-${userId || 'default'}-session` });
+  const result = await paymentGraph.invoke({ messages: [new HumanMessage(paymentContext)] });
   const annotatedResponses = (result.messages || []).map((m: any) => annotateMessage(m as AIMessage, 'assistant', 'payment'));
   
   // Log routing decision for debugging
@@ -1497,15 +1463,12 @@ export class SupervisorAgent {
   private memorySaver: MemorySaver;
   private compiledGraph: any;
   private threadPrefix: string;
-  private lgClient: LangGraphClient;
 
   constructor(userId: string, conversationId?: string) {
     this.userId = userId;
     this.conversationId = conversationId;
     this.memorySaver = new MemorySaver();
   this.threadPrefix = `supervisor-${userId}`;
-  // Reuse the module-level global LangGraphClient to avoid creating multiple connections
-  this.lgClient = globalLangGraphClient;
     
     // Create compiled graph with optimized configuration using the compile factory
     this.compiledGraph = compileSupervisorWorkflow({ 
@@ -1543,7 +1506,7 @@ export class SupervisorAgent {
 
     try {
       // Ensure remote thread exists so LangGraph streaming and memory map work consistently
-      await this.lgClient.ensureThread(effectiveConversationId, this.userId);
+      // Thread management handled by local MemorySaver
 
       // Annotate incoming user message so graph state uses AnnotatedMessage consistently
       const annotatedInput = annotateMessage(new HumanMessage(message), 'user');
@@ -1585,7 +1548,7 @@ export class SupervisorAgent {
     const threadId = this.getThreadId(effectiveConversationId);
 
     try {
-      await this.lgClient.ensureThread(effectiveConversationId, this.userId);
+      // Thread management handled by local MemorySaver
       conversationThreadTimestamps.set(effectiveConversationId, Date.now());
 
       const annotatedInput = annotateMessage(new HumanMessage(message), 'user');
@@ -1624,7 +1587,7 @@ export class SupervisorAgent {
     finalConfig.configurable.max_execution_time = finalConfig.configurable.max_execution_time || 60000;
     
     const effectiveConversationId = input.conversationId || this.conversationId || `conv-${this.userId}-session`;
-    await this.lgClient.ensureThread(effectiveConversationId, this.userId);
+    // Thread management handled by local MemorySaver
     conversationThreadTimestamps.set(effectiveConversationId, Date.now());
 
     // Ensure incoming messages are annotated (if plain HumanMessage, wrap them)
@@ -1654,7 +1617,7 @@ export class SupervisorAgent {
     const threadId = this.getThreadId(effectiveConversationId);
     try {
       // Ensure thread exists remotely
-      await this.lgClient.ensureThread(effectiveConversationId, this.userId);
+      // Thread management handled by local MemorySaver
       conversationThreadTimestamps.set(effectiveConversationId, Date.now());
       return await this.memorySaver.get({ configurable: { thread_id: threadId } });
     } catch (error) {
