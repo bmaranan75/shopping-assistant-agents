@@ -2,7 +2,7 @@
  * Product utilities for the Supervisor Agent
  */
 
-import extractProductInfoImpl from '../productExtractor';
+import extractProductInfoImpl from '../../lib/agents/productExtractor';
 import { ProductInfo } from './types';
 
 /**

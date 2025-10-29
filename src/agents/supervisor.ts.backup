@@ -28,12 +28,6 @@ import { HumanMessage, SystemMessage, AIMessage } from '@langchain/core/messages
 import { planner, invalidatePlannerCacheByPrefix } from './planner';
 import { MIN_PLANNER_CONFIDENCE, MIN_CONTINUATION_CONFIDENCE } from './constants';
 
-// Import specialized agent graphs for direct invocation
-import { catalogGraph } from './catalog-agent';
-import { cartAndCheckoutGraph } from './cart-and-checkout-agent';
-import { dealsGraph } from './deals-agent';
-import { paymentGraph } from './payment-agent';
-
 // Import from refactored modules
 import type { AnnotatedMessage, AgentRole } from './supervisor/types';
 import { SupervisorState } from './supervisor/state';
@@ -70,17 +64,7 @@ export type { AnnotatedMessage, AgentRole } from './supervisor/types';
 
 export const routePlanner = (state: typeof SupervisorState.State) => {
   const { messages, delegationDepth = 0 } = state as any;
-  
-  // CRITICAL FIX: Find the last message from the planner agent, not just the last message
-  // Progress messages and other agent messages should be skipped
-  const plannerMessages = Array.isArray(messages) 
-    ? messages.filter((m: any) => m.agent === 'planner') 
-    : [];
-  const lastPlannerMessage = plannerMessages.length > 0 
-    ? plannerMessages[plannerMessages.length - 1] 
-    : (Array.isArray(messages) && messages.length > 0 ? messages[messages.length - 1] : null);
-  
-  const lastMessage = lastPlannerMessage;
+  const lastMessage = Array.isArray(messages) && messages.length > 0 ? messages[messages.length - 1] : null;
 
   console.log("[routePlanner] Processing planner response:", JSON.stringify(lastMessage, null, 2));
 
@@ -152,9 +136,49 @@ export const routePlanner = (state: typeof SupervisorState.State) => {
 };
 
 // LangGraph server configuration
+const LANGGRAPH_SERVER_URL = 'http://localhost:2024';
 
+import LangGraphClient, { conversationThreadMap, conversationThreadTimestamps, AgentCallOptions, AgentCallResult } from './langgraphClient';
 
+// Clean up old conversation mappings (prevent memory leaks)
+// Use TTL-based eviction to avoid clearing active sessions unexpectedly.
+setInterval(() => {
+  const TTL = 60 * 60 * 1000; // 1 hour
+  const now = Date.now();
+  for (const [convId, ts] of conversationThreadTimestamps.entries()) {
+    if (now - ts > TTL) {
+      conversationThreadTimestamps.delete(convId);
+      conversationThreadMap.delete(convId);
+      console.log(`[supervisor] Evicted stale conversation: ${convId}`);
+    }
+  }
+  // Occasional logging for visibility
+  if (conversationThreadMap.size > 0) {
+    console.log(`[supervisor] Active thread mappings: ${conversationThreadMap.size}`);
+  }
+}, 10 * 60 * 1000); // run every 10 minutes
 
+// Create a singleton LangGraphClient to reuse connections across calls
+const globalLangGraphClient = new LangGraphClient(LANGGRAPH_SERVER_URL);
+
+// Internal mutable implementation reference so tests can inject mocks
+let callLangGraphAgentImpl: (opts: AgentCallOptions) => Promise<AgentCallResult> = async (opts) => {
+  return globalLangGraphClient.callAgentWithStream(opts);
+};
+
+// Public exported wrapper (immutable binding) that delegates to the mutable impl
+export async function callLangGraphAgent(opts: AgentCallOptions): Promise<AgentCallResult> {
+  return callLangGraphAgentImpl(opts);
+}
+
+// Test helper to override the internal LangGraph agent caller
+export function __setCallLangGraphAgentForTests(fn: any) {
+  callLangGraphAgentImpl = fn;
+}
+
+export function __resetCallLangGraphAgentForTests() {
+  callLangGraphAgentImpl = async (opts: AgentCallOptions) => globalLangGraphClient.callAgentWithStream(opts);
+}
 
 // Re-export utility functions from modules for backwards compatibility
 export { 
@@ -219,21 +243,6 @@ export async function detectContinuationIntent(
 async function supervisor(state: typeof SupervisorState.State) {
   const { messages, userId, conversationId, cartData, workflowContext, dealData, pendingProduct, plannerRecommendation } = state as any;
   
-  console.log('[supervisor] === RECEIVED STATE ===');
-  console.log('[supervisor] Total messages:', Array.isArray(messages) ? messages.length : 0);
-  if (Array.isArray(messages)) {
-    const userMessages = messages.filter(m => m.role === 'user');
-    console.log('[supervisor] User messages:', userMessages.length);
-    if (userMessages.length > 0) {
-      const latestUser = userMessages[userMessages.length - 1];
-      const content = typeof latestUser.message?.content === 'string' 
-        ? latestUser.message.content 
-        : JSON.stringify(latestUser.message?.content);
-      console.log('[supervisor] Latest user message:', content);
-    }
-  }
-  console.log('[supervisor] Context:', { workflowContext, userId, conversationId, hasPendingProduct: !!pendingProduct });
-  
   // Detect if this is an agent completion (agent returned to supervisor) or initial routing
   const lastMessage = Array.isArray(messages) && messages.length > 0 ? messages[messages.length - 1] : undefined;
   const isAgentCompletion = lastMessage && lastMessage.agent && lastMessage.agent !== 'supervisor' && lastMessage.agent !== 'user';
@@ -283,24 +292,15 @@ async function supervisor(state: typeof SupervisorState.State) {
   initialMessages.push(routingMessage);
   
   const lastAnnotated = Array.isArray(messages) && messages.length > 0 ? messages[messages.length - 1] : undefined;
-  
-  // CRITICAL FIX: Find the last actual USER message, not just the last message
-  // Progress messages and planner messages should be skipped
-  const userMessages = Array.isArray(messages) ? messages.filter((m: any) => m.role === 'user') : [];
-  const lastUserMessage = userMessages.length > 0 ? userMessages[userMessages.length - 1] : lastAnnotated;
-  
-  const messageContent = lastUserMessage && lastUserMessage.message
-    ? (typeof lastUserMessage.message.content === 'string' ? lastUserMessage.message.content : String(lastUserMessage.message.content))
+  const messageContent = lastAnnotated && lastAnnotated.message
+    ? (typeof lastAnnotated.message.content === 'string' ? lastAnnotated.message.content : String(lastAnnotated.message.content))
     : '';
   
   console.log(`[supervisor] Current workflow context: ${workflowContext}`);
   console.log(`[supervisor] Cart data available: ${!!cartData}`);
   console.log(`[supervisor] Deal data available: ${!!dealData}`);
   console.log(`[supervisor] Pending product: ${!!pendingProduct}`);
-  console.log(`[supervisor] Pending product value:`, JSON.stringify(pendingProduct));
-  console.log(`[supervisor] Planner recommendation:`, JSON.stringify(plannerRecommendation));
-  console.log(`[supervisor] Last user message content: "${messageContent}"`);
-  console.log(`[supervisor] EARLY CHECK CONDITIONS: workflowContext === 'awaiting_deal_confirmation': ${workflowContext === 'awaiting_deal_confirmation'}, pendingProduct exists: ${!!pendingProduct}`);
+  console.log(`[supervisor] Planner recommendation:`, plannerRecommendation);
   
   // CRITICAL: Check for workflow context continuations BEFORE planner logic
   // The planner doesn't have visibility into workflowContext, so we must handle it here first
@@ -357,29 +357,17 @@ async function supervisor(state: typeof SupervisorState.State) {
   }
   
   if (workflowContext === 'awaiting_deal_confirmation' && pendingProduct) {
-    console.log(`[supervisor] EARLY CHECK: Detected awaiting_deal_confirmation context, checking for user confirmation`);
-    console.log(`[supervisor] EARLY CHECK: Planner recommendation:`, plannerRecommendation);
+    console.log(`[supervisor] EARLY CHECK: Detected awaiting_deal_confirmation context, checking for affirmative response`);
+    // Robust affirmative detection
+    const messageWords = messageContent.toLowerCase().trim().split(/\s+/);
+    const affirmativePatterns = [
+      'yes', 'sure', 'ok', 'okay', 'apply', 'take', 
+      'sounds', 'great', 'perfect', 'good', 'deal', 'go'
+    ];
     
-    // ENHANCED: Use planner's autoApplyIntent if available, otherwise fall back to keyword matching
-    let hasAffirmative = false;
-    
-    if (plannerRecommendation && typeof plannerRecommendation.autoApplyIntent === 'boolean') {
-      // Trust the planner's LLM-based intent analysis
-      hasAffirmative = plannerRecommendation.autoApplyIntent;
-      console.log(`[supervisor] EARLY CHECK: Using planner's autoApplyIntent: ${hasAffirmative}`);
-    } else {
-      // Fallback: Robust affirmative detection using keyword matching
-      console.log(`[supervisor] EARLY CHECK: No planner recommendation, using keyword matching fallback`);
-      const messageWords = messageContent.toLowerCase().trim().split(/\s+/);
-      const affirmativePatterns = [
-        'yes', 'sure', 'ok', 'okay', 'apply', 'take', 
-        'sounds', 'great', 'perfect', 'good', 'deal', 'go'
-      ];
-      
-      hasAffirmative = affirmativePatterns.some(pattern => 
-        messageWords.some((word: string) => word.includes(pattern) || pattern.includes(word))
-      );
-    }
+    const hasAffirmative = affirmativePatterns.some(pattern => 
+      messageWords.some((word: string) => word.includes(pattern) || pattern.includes(word))
+    );
     
     if (hasAffirmative) {
       console.log(`[supervisor] EARLY CHECK: Affirmative response detected, routing to cart_and_checkout with add_to_cart_with_deals context`);
@@ -393,7 +381,6 @@ async function supervisor(state: typeof SupervisorState.State) {
         dealData,
         pendingProduct,
         cartData,
-        plannerRecommendation, // CRITICAL: Preserve planner recommendation
         messages: [...initialMessages, cartProgressMessage, lastAnnotated]
       };
     } else {
@@ -413,7 +400,6 @@ async function supervisor(state: typeof SupervisorState.State) {
         dealData: undefined,         // Clear deal data
         pendingProduct: undefined,    // Clear pending product
         cartData,
-        plannerRecommendation, // CRITICAL: Preserve planner recommendation even when clearing
         next: END
       };
     }
@@ -527,8 +513,6 @@ async function supervisor(state: typeof SupervisorState.State) {
           workflowContext: 'add_to_cart_with_deals',
           dealData,
           pendingProduct,
-          cartData,
-          plannerRecommendation, // CRITICAL: Preserve planner recommendation
           messages: [...initialMessages, dealConfirmProgressMessage, ...(lastAnnotated ? [lastAnnotated] : [])]
         };
         
@@ -541,10 +525,7 @@ async function supervisor(state: typeof SupervisorState.State) {
           userId,
           conversationId,
           workflowContext: checkoutContext,
-          dealData,
-          pendingProduct,
           cartData,
-          plannerRecommendation, // CRITICAL: Preserve planner recommendation
           messages: [...initialMessages, checkoutProgressMessage, ...(lastAnnotated ? [lastAnnotated] : [])]
         };
         
@@ -559,8 +540,6 @@ async function supervisor(state: typeof SupervisorState.State) {
           workflowContext: pendingProduct ? 'add_to_cart_with_deals' : 'check_deals',
           dealData,
           pendingProduct,
-          cartData,
-          plannerRecommendation, // CRITICAL: Preserve planner recommendation
           messages: [...initialMessages, addToCartProgressMessage, ...(lastAnnotated ? [lastAnnotated] : [])]
         };
     }
@@ -706,32 +685,16 @@ User message: "${messageContent}"`);
 async function catalogNode(state: typeof SupervisorState.State) {
   const { messages, userId, conversationId, workflowContext, dealData, pendingProduct, cartData, plannerRecommendation } = state;
   
-  console.log('[catalogNode] === CATALOG AGENT PROCESSING ===');
-  console.log('[catalogNode] User:', userId, 'Conversation:', conversationId);
-  
-  // Log user messages being processed
-  if (Array.isArray(messages)) {
-    const userMessages = messages.filter(m => m.role === 'user');
-    console.log('[catalogNode] Processing', userMessages.length, 'user messages');
-    if (userMessages.length > 0) {
-      const latestUser = userMessages[userMessages.length - 1];
-      const content = typeof latestUser.message?.content === 'string' 
-        ? latestUser.message.content 
-        : JSON.stringify(latestUser.message?.content);
-      console.log('[catalogNode] Latest user message:', content.substring(0, 200));
-    }
-  }
+  console.log('[catalogNode] Processing with catalog agent for user:', userId, 'conversation:', conversationId);
   
   const lastAnnotated = Array.isArray(messages) && messages.length > 0 ? messages[messages.length - 1] : undefined;
   const messageContent = lastAnnotated && lastAnnotated.message
     ? (typeof lastAnnotated.message.content === 'string' ? lastAnnotated.message.content : String(lastAnnotated.message.content))
     : '';
-    
-  console.log('[catalogNode] Message content to send to catalog agent:', messageContent.substring(0, 200));
 
   // Build compact context for the catalog agent and send reduced history
   const catalogContext = buildAgentContextMessage(messages as AnnotatedMessage[], 'catalog', messageContent);
-  const result = await catalogGraph.invoke({ messages: [new HumanMessage(catalogContext)] });
+  const result = await callLangGraphAgent({ agentId: 'catalog', message: catalogContext, userId: userId || 'default-user', conversationId: conversationId || `conv-${userId || 'default'}-session` });
 
   // Annotate returned messages as coming from the catalog assistant
   const annotatedResponses = (result.messages || []).map((m: any) => annotateMessage(m as AIMessage, 'assistant', 'catalog'));
@@ -761,53 +724,35 @@ async function catalogNode(state: typeof SupervisorState.State) {
 export async function cartAndCheckoutNode(state: typeof SupervisorState.State) {
   const { messages, userId, conversationId, workflowContext, dealData, pendingProduct, cartData, plannerRecommendation } = state;
   
-  // Ensure messages is a valid array
-  const safeMessages = Array.isArray(messages) ? messages : [];
-  
   console.log('[cartAndCheckoutNode] Processing with cart & checkout agent for user:', userId, 'conversation:', conversationId);
   console.log('[cartAndCheckoutNode] Workflow context:', workflowContext);
   console.log('[cartAndCheckoutNode] Deal data available:', !!dealData);
   console.log('[cartAndCheckoutNode] Deal data:', dealData);
   console.log('[cartAndCheckoutNode] Pending product:', pendingProduct);
   console.log('[cartAndCheckoutNode] Cart data:', cartData);
-  console.log('[cartAndCheckoutNode] All messages:', safeMessages.map(m => ({ 
-    role: m.role, 
-    content: m.message && m.message.content 
-      ? (typeof m.message.content === 'string' ? m.message.content : String(m.message.content)).substring(0, 100)
-      : 'No content'
-  })));
+  console.log('[cartAndCheckoutNode] All messages:', messages.map(m => ({ role: m.role, content: typeof m.message.content === 'string' ? m.message.content : String(m.message.content).substring(0, 100) })));
   
   // Determine the message to send to the cart agent
   let messageToAgent: string;
-  
-  // CRITICAL FIX: Find the last ACTUAL USER message, not progress/system messages
-  // Progress messages have empty or system-generated content
-  const userMessages = safeMessages.filter((m: any) => m.role === 'user' && m.message && m.message.content);
-  const lastUserMessage = userMessages.length > 0 ? userMessages[userMessages.length - 1] : undefined;
-  
-  const lastAnnotated = safeMessages.length > 0 ? safeMessages[safeMessages.length - 1] : undefined;
-  const originalContent = lastUserMessage && lastUserMessage.message && lastUserMessage.message.content
-    ? (typeof lastUserMessage.message.content === 'string' ? lastUserMessage.message.content : String(lastUserMessage.message.content))
+  const lastAnnotated = Array.isArray(messages) && messages.length > 0 ? messages[messages.length - 1] : undefined;
+  const originalContent = lastAnnotated && lastAnnotated.message
+    ? (typeof lastAnnotated.message.content === 'string' ? lastAnnotated.message.content : String(lastAnnotated.message.content))
     : '';
   
   // Extract the original user message to determine if this is a checkout request
-  // Don't use planner routing messages which contain "cart_and_checkout"
-  const actualUserContent = originalContent;
+  // Don't use planner routing messages which contain "cart_and_checkout" 
+  const userMessages = messages.filter(m => m.role === 'user');
+  const lastUserMessage = userMessages.length > 0 ? userMessages[userMessages.length - 1] : null;
+  const actualUserContent = lastUserMessage ? 
+    (typeof lastUserMessage.message.content === 'string' ? lastUserMessage.message.content : String(lastUserMessage.message.content)) 
+    : originalContent;
   
   // Check if this is a checkout request based on actual user intent, not planner routing
-  // ENHANCED: More specific checkout detection to avoid false positives
-  const isCheckoutRequest = (
-    actualUserContent.toLowerCase().includes('checkout') || 
-    actualUserContent.toLowerCase().includes('complete') && actualUserContent.toLowerCase().includes('order') ||
-    actualUserContent.toLowerCase().includes('place') && actualUserContent.toLowerCase().includes('order') ||
-    actualUserContent.toLowerCase().includes('buy now') ||
-    actualUserContent.toLowerCase().includes('purchase now') ||
-    workflowContext === 'process_checkout' ||
-    workflowContext === 'prepare_checkout'
-  );
-  
-  console.log('[cartAndCheckoutNode] User message:', actualUserContent);
-  console.log('[cartAndCheckoutNode] Is checkout request:', isCheckoutRequest);
+  const isCheckoutRequest = actualUserContent.toLowerCase().includes('checkout') || 
+                           actualUserContent.toLowerCase().includes('buy') ||
+                           actualUserContent.toLowerCase().includes('purchase') ||
+                           workflowContext === 'process_checkout' ||
+                           workflowContext === 'prepare_checkout';
   
   if (workflowContext === 'add_to_cart_with_deals' && pendingProduct) {
     // Handle add-to-cart with deal context - provide full context to agent
@@ -833,9 +778,6 @@ export async function cartAndCheckoutNode(state: typeof SupervisorState.State) {
           messageToAgent += ` and apply the ${dealData.type || 'available'} deal that was offered`;
         }
       }
-      
-      // CRITICAL: Explicitly tell agent to ONLY add to cart, not checkout
-      messageToAgent += `. DO NOT proceed to checkout - just add the items to the cart and confirm.`;
     }
     
     console.log('[cartAndCheckoutNode] Deal context message:', messageToAgent);
@@ -856,19 +798,19 @@ export async function cartAndCheckoutNode(state: typeof SupervisorState.State) {
   // Build compact context for cart agent and prepend detailed action instructions
   // CRITICAL FIX: When in add_to_cart_with_deals context with structured instructions,
   // filter out the original user "add to cart" message from context to prevent duplicate operations
-  let filteredMessages = safeMessages;
+  let filteredMessages = messages;
   if (workflowContext === 'add_to_cart_with_deals' && pendingProduct) {
     console.log('[cartAndCheckoutNode] Filtering out original add-to-cart request to prevent duplication');
     // Remove user messages that contain "add" + product name to prevent duplicate processing
     const productName = pendingProduct.product.toLowerCase();
-    filteredMessages = safeMessages.filter((m: any) => {
+    filteredMessages = messages.filter((m: any) => {
       if (m.role !== 'user') return true; // Keep all non-user messages
       const content = (typeof m.message?.content === 'string' ? m.message.content : String(m.message?.content || '')).toLowerCase();
       // Filter out messages that contain both "add" and the product name
       const isOriginalAddRequest = content.includes('add') && content.includes(productName);
       return !isOriginalAddRequest;
     });
-    console.log(`[cartAndCheckoutNode] Filtered messages: ${safeMessages.length} -> ${filteredMessages.length}`);
+    console.log(`[cartAndCheckoutNode] Filtered messages: ${messages.length} -> ${filteredMessages.length}`);
   }
   
   const cartContext = buildAgentContextMessage(filteredMessages as AnnotatedMessage[], 'cart_and_checkout', actualUserContent);
@@ -880,13 +822,13 @@ export async function cartAndCheckoutNode(state: typeof SupervisorState.State) {
 
   const fullCartMessage = `${cartContext}\n\n${messageToAgent}${structuredInstruction}`;
   
-  const result = await cartAndCheckoutGraph.invoke({ messages: [new HumanMessage(fullCartMessage)] });
+  const result = await callLangGraphAgent({ agentId: 'cart_and_checkout', message: fullCartMessage, userId: userId || 'default-user', conversationId: conversationId || `conv-${userId || 'default'}-session` });
 
   const annotatedResponses = (result.messages || []).map((m: any) => annotateMessage(m as AIMessage, 'assistant', 'cart_and_checkout'));
   
   // Check if the cart operation failed and suggest alternative
   const resultMessage = result.messages && result.messages.length > 0 ? result.messages[result.messages.length - 1] : null;
-  const responseContent = resultMessage && resultMessage.content ? (typeof resultMessage.content === 'string' ? resultMessage.content : '') : '';
+  const responseContent = resultMessage && resultMessage.content ? (typeof resultMessage.content === 'string' ? resultMessage.content : '') : (result.content || '');
   
   // Detect if product was not recognized
   const contentStr = typeof responseContent === 'string' ? responseContent : '';
@@ -1042,39 +984,6 @@ export async function cartAndCheckoutNode(state: typeof SupervisorState.State) {
     state: { workflowContext, pendingProduct: !!pendingProduct, dealData: !!dealData, cartData: !!cartData }
   });
 
-  // ENHANCEMENT: Add clear success message for add_to_cart_with_deals workflow
-  if (workflowContext === 'add_to_cart_with_deals' && pendingProduct) {
-    console.log('[cartAndCheckoutNode] Adding success confirmation for add_to_cart_with_deals workflow');
-    
-    // Extract success confirmation from cart agent response or create one
-    const addedSuccessfully = contentStr.toLowerCase().includes('added') || 
-                             contentStr.toLowerCase().includes('successfully') ||
-                             contentStr.toLowerCase().includes('cart');
-    
-    if (addedSuccessfully) {
-      const successMessage = new AIMessage(
-        `✅ Successfully added ${pendingProduct.quantity || 1} ${pendingProduct.product} to your cart${dealData?.applied ? ' with deal applied' : ''}!`
-      );
-      
-      const messagesWithSuccess = [
-        ...annotatedResponses,
-        annotateMessage(successMessage, 'assistant', 'cart_and_checkout')
-      ];
-      
-      return {
-        messages: messagesWithSuccess,
-        userId,
-        conversationId,
-        workflowContext: null, // Clear workflow - operation complete
-        dealData,
-        pendingProduct: null, // Clear after successful add
-        cartData,
-        plannerRecommendation,
-        next: END,
-      };
-    }
-  }
-
   // Check if this was an add-to-cart operation that should automatically proceed to checkout
   // Similar to add_to_cart_with_deals pattern
   const shouldAutoCheckout = (
@@ -1142,16 +1051,13 @@ export async function cartAndCheckoutNode(state: typeof SupervisorState.State) {
 async function dealsNode(state: typeof SupervisorState.State) {
   const { messages, userId, conversationId, workflowContext, pendingProduct, dealData, cartData, plannerRecommendation } = state;
   
-  // Ensure messages is a valid array
-  const safeMessages = Array.isArray(messages) ? messages : [];
-  
   console.log('[dealsNode] Processing with deals agent for user:', userId, 'conversation:', conversationId);
   console.log('[dealsNode] Workflow context:', workflowContext);
   console.log('[dealsNode] Pending product:', pendingProduct);
   console.log('[dealsNode] Planner recommendation:', plannerRecommendation);
   
   // Determine message to send to deals agent
-  const lastAnnotated = safeMessages.length > 0 ? safeMessages[safeMessages.length - 1] : undefined;
+  const lastAnnotated = Array.isArray(messages) && messages.length > 0 ? messages[messages.length - 1] : undefined;
   let messageToAgent = lastAnnotated && lastAnnotated.message
     ? (typeof lastAnnotated.message.content === 'string' ? lastAnnotated.message.content : String(lastAnnotated.message.content))
     : '';
@@ -1163,7 +1069,7 @@ async function dealsNode(state: typeof SupervisorState.State) {
     console.log('[dealsNode] No pending product in state, attempting extraction from recent messages');
     
     // Get last 2 user messages to search for product information
-    const userMessages = safeMessages.filter(m => m.role === 'user');
+    const userMessages = messages.filter(m => m.role === 'user');
     const recentUserMessages = userMessages.slice(-2); // Last 2 user messages
     
     console.log('[dealsNode] Recent user messages count:', recentUserMessages.length);
@@ -1171,13 +1077,6 @@ async function dealsNode(state: typeof SupervisorState.State) {
     // Try extracting from each recent message, most recent first
     for (let i = recentUserMessages.length - 1; i >= 0 && !effectivePending; i--) {
       const msg = recentUserMessages[i];
-      
-      // Safety check for message.content
-      if (!msg.message || !msg.message.content) {
-        console.warn(`[dealsNode] Message ${i + 1} has no content, skipping`);
-        continue;
-      }
-      
       const content = typeof msg.message.content === 'string' 
         ? msg.message.content 
         : String(msg.message.content);
@@ -1246,18 +1145,16 @@ async function dealsNode(state: typeof SupervisorState.State) {
     }
   }
   
-  const dealsContext = buildAgentContextMessage(safeMessages as AnnotatedMessage[], 'deals', messageToAgent);
-  const result = await dealsGraph.invoke({ messages: [new HumanMessage(dealsContext)] });
+  const dealsContext = buildAgentContextMessage(messages as AnnotatedMessage[], 'deals', messageToAgent);
+  const result = await callLangGraphAgent({ agentId: 'deals', message: dealsContext, userId: userId || 'default-user', conversationId: conversationId || `conv-${userId || 'default'}-session` });
   const annotatedResponses = (result.messages || []).map((m: any) => annotateMessage(m as AIMessage, 'assistant', 'deals'));
   // Analyze response for deal confirmation needs
   const responseMessages = annotatedResponses;
-  const responseContent = annotatedResponses.length > 0 && annotatedResponses[0]?.message?.content 
-    ? (typeof annotatedResponses[0].message.content === 'string' ? annotatedResponses[0].message.content : 'No deals found')
-    : 'No deals found';
+  const responseContent = result.content || 'No deals found';
   
   // Get the ORIGINAL user message to check for auto-apply intent
-  const userMessages = safeMessages.filter(m => m.role === 'user');
-  const originalUserMessage = userMessages.length > 0 && userMessages[userMessages.length - 1].message && userMessages[userMessages.length - 1].message.content
+  const userMessages = messages.filter(m => m.role === 'user');
+  const originalUserMessage = userMessages.length > 0 
     ? (typeof userMessages[userMessages.length - 1].message.content === 'string' 
         ? userMessages[userMessages.length - 1].message.content 
         : String(userMessages[userMessages.length - 1].message.content))
@@ -1279,7 +1176,6 @@ async function dealsNode(state: typeof SupervisorState.State) {
   const autoApplyIntent = plannerRecommendation?.autoApplyIntent === true;
   
   console.log('[dealsNode] Auto-apply intent from planner:', autoApplyIntent);
-  console.log('[dealsNode] Planner recommendation:', JSON.stringify(plannerRecommendation));
   if (!plannerRecommendation) {
     console.warn('[dealsNode] No planner recommendation available - defaulting to manual confirmation');
   }
@@ -1290,109 +1186,129 @@ async function dealsNode(state: typeof SupervisorState.State) {
                               responseContent.toLowerCase().includes('interested in') ||
                               responseContent.toLowerCase().includes('take advantage');
   
-  console.log('[dealsNode] Requires confirmation:', requiresConfirmation);
-  console.log('[dealsNode] Is complex workflow:', isComplexWorkflow);
-  console.log('[dealsNode] Response content preview:', responseContent.substring(0, 200));
-  
-  // CRITICAL FIX: Check autoApplyIntent FIRST, before checking for confirmation prompts
-  // If user explicitly said "just take any deals", we should auto-apply regardless of response wording
-  if (autoApplyIntent && !responseContent.toLowerCase().includes('no current deals') && !responseContent.toLowerCase().includes('no deals available')) {
-    // ALWAYS auto-proceed when autoApplyIntent is true and deals are available
-    console.log('[dealsNode] AUTO-APPLY: User explicitly requested auto-apply - proceeding without confirmation');
-    console.log('[dealsNode] Pending product:', effectivePending || pendingProduct);
-    
-    // Invalidate planner cache for this conversation/user since dealData was applied/changed
-    try { invalidatePlannerCacheByPrefix(`${conversationId || 'global'}:${userId}`); } catch (e) { console.warn('[supervisor] Failed to invalidate planner cache', e); }
-
-    // CRITICAL: Replace the deals agent's confirmation question with an auto-apply confirmation
-    // Extract deal info from response if available
-    const dealInfo = responseContent.match(/\$[\d.]+\s*off|[\d]+%\s*off|deal price:?\s*\$[\d.]+/i);
-    const dealSummary = dealInfo ? dealInfo[0] : 'available deals';
-    
-    const autoApplyMessage = new AIMessage(
-      `✅ Found ${dealSummary} on ${(effectivePending || pendingProduct)?.product}! Auto-applying and adding to your cart...`
-    );
-    
-    // Add auto-apply confirmation and progress message instead of the deals agent's question
-    const messagesWithProgress = [
-      annotateMessage(autoApplyMessage, 'assistant', 'deals'),
-      createProgressMessage('🛒 Adding items to your cart with deals applied...', 'supervisor')
-    ];
-
-    // Log routing decision for debugging
-    console.log('[dealsNode] ROUTING DECISION:', {
-      fromAgent: 'deals',
-      toAgent: 'supervisor',
-      reason: 'Auto-apply intent - routing to supervisor for cart delegation',
-      state: { 
-        workflowContext: 'add_to_cart_with_deals', 
-        pendingProduct: effectivePending || pendingProduct,
-        dealData: { applied: true, type: 'product_deal' }
-      }
-    });
-
-    return {
-      messages: messagesWithProgress,
-      workflowContext: 'add_to_cart_with_deals',
-      dealData: { 
-        ...dealData, // Preserve existing deal data
-        applied: true, 
-        response: responseContent, 
-        type: 'product_deal',
-        originalIntent: messageToAgent // Preserve original user intent for cart context
-      },
-      pendingProduct: effectivePending || pendingProduct,
-      cartData, // Preserve cart data
-      userId,
-      conversationId,
-      plannerRecommendation, // CRITICAL: Preserve planner recommendation
-      next: 'supervisor', // Route back to supervisor for delegation
-    };
-  }
-  
   // CRITICAL: Only auto-proceed when user explicitly requested auto-apply
   // Complex workflows WITHOUT auto-apply intent should still require confirmation
   if (requiresConfirmation || (isComplexWorkflow && !responseContent.toLowerCase().includes('no current deals') && !responseContent.toLowerCase().includes('no deals available'))) {
-    // Deal found - requires manual confirmation (autoApplyIntent was false or not set)
+    // Deal found - check if user wants auto-apply or manual confirmation
     
-    // Note: autoApplyIntent=true case is already handled above, so we only reach here for manual confirmation
-    console.log('[dealsNode] Manual confirmation required - awaiting user response');
-    console.log('[dealsNode] Requires confirmation:', requiresConfirmation);
-    console.log('[dealsNode] Complex workflow:', isComplexWorkflow);
-    console.log('[dealsNode] Pending product:', effectivePending || pendingProduct);
-    console.log('[dealsNode] Deal data will be:', { pending: true, response: responseContent });
-    
-    // Invalidate planner cache for this conversation/user since deal state changed (pending confirmation)
-    try { invalidatePlannerCacheByPrefix(`${conversationId || 'global'}:${userId}`); } catch (e) { console.warn('[supervisor] Failed to invalidate planner cache', e); }
+    if (autoApplyIntent) {
+      // ONLY auto-proceed when user explicitly said "just take them", "use any deals", etc.
+      console.log('[dealsNode] Auto-apply intent detected - auto-proceeding to cart (no confirmation needed)');
+      console.log('[dealsNode] Auto-apply intent:', autoApplyIntent);
+      console.log('[dealsNode] Complex workflow:', isComplexWorkflow);
+      console.log('[dealsNode] Pending product:', effectivePending || pendingProduct);
+      
+      // Invalidate planner cache for this conversation/user since dealData was applied/changed
+      try { invalidatePlannerCacheByPrefix(`${conversationId || 'global'}:${userId}`); } catch (e) { console.warn('[supervisor] Failed to invalidate planner cache', e); }
 
-    // Log routing decision for debugging
-    console.log('[dealsNode] ROUTING DECISION:', {
-      fromAgent: 'deals',
-      toAgent: END,
-      reason: 'Manual confirmation required - ending workflow to await user response',
-      state: { 
-        workflowContext: 'awaiting_deal_confirmation', 
+      // Add progress message for transition to cart operations
+      const messagesWithProgress = [
+        ...responseMessages,
+        createProgressMessage('🛒 Adding items to your cart...', 'supervisor')
+      ];
+
+      // Log routing decision for debugging
+      console.log('[dealsNode] ROUTING DECISION:', {
+        fromAgent: 'deals',
+        toAgent: 'supervisor',
+        reason: 'Auto-apply intent - routing to supervisor for cart delegation',
+        state: { 
+          workflowContext: 'add_to_cart_with_deals', 
+          pendingProduct: effectivePending || pendingProduct,
+          dealData: { applied: true, type: 'product_deal' }
+        }
+      });
+
+      return {
+        messages: messagesWithProgress,
+        workflowContext: 'add_to_cart_with_deals',
+        dealData: { 
+          ...dealData, // Preserve existing deal data
+          applied: true, 
+          response: responseContent, 
+          type: 'product_deal',
+          originalIntent: messageToAgent // Preserve original user intent for cart context
+        },
         pendingProduct: effectivePending || pendingProduct,
-        dealData: { pending: true, type: 'product_deal' }
-      }
-    });
+        cartData, // Preserve cart data
+        userId,
+        conversationId,
+        plannerRecommendation, // CRITICAL: Preserve planner recommendation
+        next: 'supervisor', // Route back to supervisor for delegation
+      };
+    } else if (requiresConfirmation) {
+      // For simple deal queries with confirmation language, require manual confirmation
+      console.log('[dealsNode] Simple deal query with confirmation language - requiring manual confirmation');
+      console.log('[dealsNode] Pending product:', pendingProduct);
+      console.log('[dealsNode] Deal data will be:', { pending: true, response: responseContent });
+      
+      // Invalidate planner cache for this conversation/user since deal state changed (pending confirmation)
+      try { invalidatePlannerCacheByPrefix(`${conversationId || 'global'}:${userId}`); } catch (e) { console.warn('[supervisor] Failed to invalidate planner cache', e); }
 
-    return {
-      messages: responseMessages,
-      workflowContext: 'awaiting_deal_confirmation',
-      dealData: { 
-        ...dealData, // Preserve existing deal data
-        pending: true, 
-        response: responseContent, 
-        type: 'product_deal' 
-      },
-      pendingProduct: effectivePending || pendingProduct,
-      cartData, // Preserve cart data
-      userId,
-      conversationId,
-      plannerRecommendation, // CRITICAL: Preserve planner recommendation
-      next: END,
-    };
+      // Log routing decision for debugging
+      console.log('[dealsNode] ROUTING DECISION:', {
+        fromAgent: 'deals',
+        toAgent: END,
+        reason: 'Manual confirmation required - ending workflow',
+        state: { 
+          workflowContext: 'awaiting_deal_confirmation', 
+          pendingProduct: effectivePending || pendingProduct,
+          dealData: { pending: true, type: 'product_deal' }
+        }
+      });
+
+      return {
+        messages: responseMessages,
+        workflowContext: 'awaiting_deal_confirmation',
+        dealData: { 
+          ...dealData, // Preserve existing deal data
+          pending: true, 
+          response: responseContent, 
+          type: 'product_deal' 
+        },
+        pendingProduct: effectivePending || pendingProduct,
+        cartData, // Preserve cart data
+        userId,
+        conversationId,
+        plannerRecommendation, // CRITICAL: Preserve planner recommendation
+        next: END,
+      };
+    } else {
+      // Deal found but no confirmation needed, proceed to add to cart
+      console.log('[dealsNode] Deal found without confirmation language - proceeding to cart');
+      
+      // Invalidate planner cache for this conversation/user since dealData was applied/changed
+      try { invalidatePlannerCacheByPrefix(`${conversationId || 'global'}:${userId}`); } catch (e) { console.warn('[supervisor] Failed to invalidate planner cache', e); }
+
+      // Log routing decision for debugging
+      console.log('[dealsNode] ROUTING DECISION:', {
+        fromAgent: 'deals',
+        toAgent: 'cart_and_checkout',
+        reason: 'Deal found without confirmation - direct to cart',
+        state: { 
+          workflowContext: 'add_to_cart_with_deals', 
+          pendingProduct: effectivePending,
+          dealData: { applied: true, type: 'product_deal' }
+        }
+      });
+
+      return {
+        messages: responseMessages,
+        workflowContext: 'add_to_cart_with_deals',
+        dealData: { 
+          ...dealData,
+          applied: true, 
+          response: responseContent, 
+          type: 'product_deal' 
+        },
+        pendingProduct: effectivePending,
+        cartData,
+        userId,
+        conversationId,
+        plannerRecommendation, // CRITICAL: Preserve planner recommendation
+        next: 'cart_and_checkout',
+      };
+    }
   } else {
     // Check if this is a "no deals available" scenario
     const noDealsAvailable = responseContent.toLowerCase().includes('no current deals') ||
@@ -1435,39 +1351,6 @@ async function dealsNode(state: typeof SupervisorState.State) {
         next: END,
       };
     }
-    
-    // DEFAULT: Deals found but no special handling - just display and end
-    // This handles cases where deals are shown without confirmation prompts
-    console.log('[dealsNode] Deals displayed, ending workflow to allow user response');
-    
-    // Log routing decision for debugging
-    console.log('[dealsNode] ROUTING DECISION:', {
-      fromAgent: 'deals',
-      toAgent: END,
-      reason: 'Deals displayed without confirmation - ending workflow',
-      state: { 
-        workflowContext: null,
-        pendingProduct: effectivePending,
-        dealData: { displayed: true, type: 'deals_info' }
-      }
-    });
-    
-    return {
-      messages: responseMessages,
-      workflowContext: null, // Clear workflow context
-      dealData: { 
-        ...dealData,
-        displayed: true,
-        response: responseContent,
-        type: 'deals_info'
-      },
-      pendingProduct: effectivePending, // Keep pending product in case user wants to act on it
-      cartData,
-      userId,
-      conversationId,
-      plannerRecommendation, // CRITICAL: Preserve planner recommendation
-      next: END,
-    };
   }
 }
 
@@ -1483,7 +1366,7 @@ async function paymentNode(state: typeof SupervisorState.State) {
     : '';
   
   const paymentContext = buildAgentContextMessage(messages as AnnotatedMessage[], 'payment', messageContent);
-  const result = await paymentGraph.invoke({ messages: [new HumanMessage(paymentContext)] });
+  const result = await callLangGraphAgent({ agentId: 'payment', message: paymentContext, userId: userId || 'default-user', conversationId: conversationId || `conv-${userId || 'default'}-session` });
   const annotatedResponses = (result.messages || []).map((m: any) => annotateMessage(m as AIMessage, 'assistant', 'payment'));
   
   // Log routing decision for debugging
@@ -1517,12 +1400,7 @@ import {
 
 // Wrapper function to adapt state format for notification agent
 async function notificationAgent(state: typeof SupervisorState.State) {
-  // Create type-compatible wrapper functions
-  const compatAnnotateMessage = (message: any, role: string, agent?: string) => {
-    return annotateMessage(message, role as AgentRole, agent);
-  };
-  
-  return notificationAgentImpl(state as any, compatAnnotateMessage, createProgressMessage);
+  return notificationAgentImpl(state as any, annotateMessage, createProgressMessage);
 }
 
 import { responseTool, planTool } from '../tools/routing';
@@ -1619,12 +1497,15 @@ export class SupervisorAgent {
   private memorySaver: MemorySaver;
   private compiledGraph: any;
   private threadPrefix: string;
+  private lgClient: LangGraphClient;
 
   constructor(userId: string, conversationId?: string) {
     this.userId = userId;
     this.conversationId = conversationId;
     this.memorySaver = new MemorySaver();
   this.threadPrefix = `supervisor-${userId}`;
+  // Reuse the module-level global LangGraphClient to avoid creating multiple connections
+  this.lgClient = globalLangGraphClient;
     
     // Create compiled graph with optimized configuration using the compile factory
     this.compiledGraph = compileSupervisorWorkflow({ 
@@ -1637,9 +1518,16 @@ export class SupervisorAgent {
     console.log('[SupervisorAgent] Initialized for userId:', userId, 'threadPrefix:', this.threadPrefix);
   }
 
-  // Generate thread ID for local graph execution
+  // CRITICAL FIX: Use consistent thread ID that matches remote agents
   private getThreadId(conversationId?: string): string {
     const effectiveConversationId = conversationId || this.conversationId || `conv-${this.userId}-session`;
+    
+    // Check if this conversation already has a mapped thread ID from remote agents
+    const existingThreadId = conversationThreadMap.get(effectiveConversationId);
+    if (existingThreadId) {
+      console.log(`[SupervisorAgent] Using existing mapped thread: ${existingThreadId} for conversation: ${effectiveConversationId}`);
+      return existingThreadId;
+    }
     
     // Use supervisor-specific thread ID format for local graph execution
     return `supervisor-${effectiveConversationId}`;
@@ -1655,7 +1543,7 @@ export class SupervisorAgent {
 
     try {
       // Ensure remote thread exists so LangGraph streaming and memory map work consistently
-      // Thread management handled by local MemorySaver
+      await this.lgClient.ensureThread(effectiveConversationId, this.userId);
 
       // Annotate incoming user message so graph state uses AnnotatedMessage consistently
       const annotatedInput = annotateMessage(new HumanMessage(message), 'user');
@@ -1673,6 +1561,9 @@ export class SupervisorAgent {
           max_execution_time: 60000 // 60 seconds
         }
       });
+
+      // update timestamp for mapping
+      conversationThreadTimestamps.set(effectiveConversationId, Date.now());
 
       return result;
     } catch (error) {
@@ -1694,7 +1585,8 @@ export class SupervisorAgent {
     const threadId = this.getThreadId(effectiveConversationId);
 
     try {
-      // Thread management handled by local MemorySaver
+      await this.lgClient.ensureThread(effectiveConversationId, this.userId);
+      conversationThreadTimestamps.set(effectiveConversationId, Date.now());
 
       const annotatedInput = annotateMessage(new HumanMessage(message), 'user');
 
@@ -1732,65 +1624,20 @@ export class SupervisorAgent {
     finalConfig.configurable.max_execution_time = finalConfig.configurable.max_execution_time || 60000;
     
     const effectiveConversationId = input.conversationId || this.conversationId || `conv-${this.userId}-session`;
-    // Thread management handled by local MemorySaver
+    await this.lgClient.ensureThread(effectiveConversationId, this.userId);
+    conversationThreadTimestamps.set(effectiveConversationId, Date.now());
 
-    // Ensure incoming messages are annotated (handle both LangChain instances and plain objects)
-    console.log('[SupervisorChatClient] === INCOMING MESSAGES ===');
-    console.log('[SupervisorChatClient] Received', input.messages?.length || 0, 'messages');
-    console.log('[SupervisorChatClient] Raw input:', JSON.stringify(input, null, 2));
-    if (input.messages && input.messages.length > 0) {
-      input.messages.forEach((m, idx) => {
-        console.log(`[SupervisorChatClient] Message ${idx} full structure:`, JSON.stringify(m, null, 2));
-      });
-    }
-    
-    const annotatedMessages = input.messages.map((m, idx) => {
-      // Already an AnnotatedMessage
-      if ((m as AnnotatedMessage).message) {
-        return m as AnnotatedMessage;
-      }
-      
-      // Handle LangChain message instances
+    // Ensure incoming messages are annotated (if plain HumanMessage, wrap them)
+    const annotatedMessages = input.messages.map(m => {
+      if ((m as AnnotatedMessage).message) return m as AnnotatedMessage;
+      // assume m is a HumanMessage/SystemMessage/AIMessage
       if (m instanceof HumanMessage) {
         return annotateMessage(m, 'user');
       }
       if (m instanceof SystemMessage) {
         return annotateMessage(m, 'system');
       }
-      if (m instanceof AIMessage) {
-        return annotateMessage(m, 'assistant');
-      }
-      
-      // Handle plain objects from LangGraph client
-      if (m && typeof m === 'object') {
-        let messageInstance;
-        
-        if (m.type === 'human' || (m.role === 'user' || m.role === 'human')) {
-          messageInstance = new HumanMessage(m.content || m.message || '');
-          return annotateMessage(messageInstance, 'user');
-        }
-        
-        if (m.type === 'system' || m.role === 'system') {
-          messageInstance = new SystemMessage(m.content || m.message || '');
-          return annotateMessage(messageInstance, 'system');
-        }
-        
-        if (m.type === 'ai' || m.role === 'assistant' || m.role === 'ai') {
-          messageInstance = new AIMessage(m.content || m.message || '');
-          return annotateMessage(messageInstance, 'assistant');
-        }
-        
-        // Fallback: treat as human message if it has content
-        if (m.content) {
-          messageInstance = new HumanMessage(m.content);
-          return annotateMessage(messageInstance, 'user');
-        }
-      }
-      
-      // Final fallback
-      console.warn(`[SupervisorChatClient] Unknown message format at ${idx}:`, m);
-      const fallbackMessage = new HumanMessage(String(m));
-      return annotateMessage(fallbackMessage, 'user');
+      return annotateMessage(m as AIMessage, 'assistant');
     });
 
     return await this.compiledGraph.invoke({
@@ -1806,7 +1653,9 @@ export class SupervisorAgent {
     const effectiveConversationId = conversationId || this.conversationId || `conv-${this.userId}-session`;
     const threadId = this.getThreadId(effectiveConversationId);
     try {
-      // Thread management handled by local MemorySaver
+      // Ensure thread exists remotely
+      await this.lgClient.ensureThread(effectiveConversationId, this.userId);
+      conversationThreadTimestamps.set(effectiveConversationId, Date.now());
       return await this.memorySaver.get({ configurable: { thread_id: threadId } });
     } catch (error) {
       console.error('[SupervisorAgent] Error getting current state:', error);
@@ -1819,6 +1668,10 @@ export class SupervisorAgent {
     const effectiveConversationId = conversationId || this.conversationId || `conv-${this.userId}-session`;
     const threadId = this.getThreadId(effectiveConversationId);
     try {
+      // Remove from local maps
+      conversationThreadMap.delete(effectiveConversationId);
+      conversationThreadTimestamps.delete(effectiveConversationId);
+
       // Reset memory saver for this agent instance
       this.memorySaver = new MemorySaver();
       console.log('[SupervisorAgent] Cleared session for conversation:', effectiveConversationId, 'thread:', threadId);
@@ -1830,9 +1683,14 @@ export class SupervisorAgent {
   // NEW: Get all active sessions for this user
   async getActiveSessions(): Promise<string[]> {
     try {
-      // For local deployment, we don't track cross-service sessions
-      // Each agent manages its own state through MemorySaver
-      return [];
+      // Return active conversation IDs for this user from the in-memory map
+      const active: string[] = [];
+      for (const [convId, threadId] of conversationThreadMap.entries()) {
+        if (convId.includes(this.userId) || convId.includes(`conv-${this.userId}`) || threadId?.includes(this.userId)) {
+          active.push(convId);
+        }
+      }
+      return active;
     } catch (error) {
       console.error('[SupervisorAgent] Error getting active sessions:', error);
       return [];

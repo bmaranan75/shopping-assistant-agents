@@ -5,7 +5,7 @@
   "main": "src/agents/supervisor.ts",
   "scripts": {
     "dev": "npx @langchain/langgraph-cli dev",
-    "build": "npx @langchain/langgraph-cli build .",
+    "build": "npx @langchain/langgraph-cli build . --tag latest",
     "deploy": "npx @langchain/langgraph-cli deploy --wait",
     "deploy:prod": "npx @langchain/langgraph-cli deploy --tag production --wait",
     "test": "vitest run",

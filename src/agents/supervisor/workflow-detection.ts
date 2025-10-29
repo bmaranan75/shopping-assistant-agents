@@ -2,7 +2,7 @@
  * Workflow detection utilities for the Supervisor Agent
  */
 
-import detectContinuationIntentImpl from '../continuationDetector';
+import detectContinuationIntentImpl from '../../lib/agents/continuationDetector';
 import { WorkflowDetectionResult, ContinuationAnalysis, AnnotatedMessage } from './types';
 
 /**
@@ -91,12 +91,17 @@ export async function detectContinuationIntent(
 ): Promise<ContinuationAnalysis> {
   // Use cache if provided
   if (cache) {
+    // Ensure messages is a valid array before processing
+    const safeMessages = Array.isArray(messages) ? messages : [];
     const fingerprint = [
       String(message || '').slice(0, 1000),
       workflowContext || '',
       JSON.stringify(pendingProduct || {}).slice(0, 300),
       JSON.stringify(dealData || {}).slice(0, 300),
-      messages.slice(-6).map(m => (typeof m.message.content === 'string' ? m.message.content : JSON.stringify(m.message.content))).join('|').slice(0, 1000)
+      safeMessages.slice(-6).map(m => {
+        if (!m || !m.message || !m.message.content) return '';
+        return typeof m.message.content === 'string' ? m.message.content : JSON.stringify(m.message.content);
+      }).join('|').slice(0, 1000)
     ].join('||');
 
     const key = `continuation:${fingerprint}`;

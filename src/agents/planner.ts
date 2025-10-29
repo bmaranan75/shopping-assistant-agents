@@ -96,91 +96,156 @@ export function getPlannerAverageConfidence() {
 const plannerPrompt = ChatPromptTemplate.fromMessages([
   [
     "system",
-    `You are a routing classifier for an online grocery shopping system.
+    `You are a routing classifier for a grocery shopping assistant.
 
-TASK: Classify if the user's request is grocery-related, considering conversation context.
+TASK: Analyze the user's message and return a JSON classification.
 
-CURRENT CONVERSATION STATE (if provided):
-- Workflow Context: {workflowContext}
+CONTEXT (if provided):
+- Workflow: {workflowContext}
 - Pending Product: {pendingProduct}
 - Deal Status: {dealStatus}
 
-OUTPUT FORMAT: Return valid JSON with these fields:
-- action: either "delegate" or "direct_response"
-- confidence: number between 0.0 and 1.0
-- reasoning: brief explanation of your decision
-- task: response text (only required for direct_response action)
-- autoApplyIntent: boolean (true if user wants automatic deal application without confirmation)
+OUTPUT: JSON object with:
+- action: "delegate" | "direct_response"
+- confidence: 0.0-1.0
+- reasoning: brief explanation
+- task: response text (direct_response only)
+- autoApplyIntent: boolean (deal auto-apply flag)
 
-AUTO-APPLY INTENT DETECTION:
-Set autoApplyIntent=true when user indicates they want automatic deal application:
-- Phrases like: "just take/use/apply any deal", "use the deal", "apply it/them"
-- Conditional auto-apply: "if there's a deal, use it", "apply any deals available"
-- Implicit acceptance: "yes, apply", "sure, use it", "go ahead"
-- NOT auto-apply: simple questions like "check deals", "are there deals", or ambiguous requests
+CLASSIFICATION LOGIC:
 
-CLASSIFICATION RULES:
-1. action="delegate" → Request involves ANY aspect of grocery shopping
-   - Product search, browsing catalog, finding items
-   - Deals, promotions, discounts, savings
-   - Shopping cart operations (add, remove, view, update)
-   - Checkout, payment, order placement
-   - Product information, availability, prices
-   - Delivery, pickup, order tracking
-   - Store information related to shopping
-   - Greetings in shopping context
-   - **Continuation responses (yes/no) when workflowContext is set**
+1. DEAL CONFIRMATION (highest priority when dealStatus="pending" OR workflowContext="awaiting_deal_confirmation"):
+   - Affirmative words ("yes", "sure", "ok", "okay", "sounds good", "go ahead", "please") → autoApplyIntent=true
+   - Negative words ("no", "not", "skip", "decline", "no thanks") → autoApplyIntent=false
+   - All deal confirmations: action="delegate"
 
-2. action="direct_response" → Request is NOT about grocery shopping
-   - Unrelated topics (weather, jokes, news, general knowledge)
-   - Small talk not connected to shopping
-   - Provide polite response in "task" field
+2. AUTO-APPLY DETECTION (when dealStatus != "pending"):
+   - Explicit: "use any deals", "apply the deal", "go ahead with deal" → autoApplyIntent=true
+   - Conditional: "if there's a deal, use it", "apply deals available" → autoApplyIntent=true
+   - Questions only: "check deals", "are there deals?" → autoApplyIntent=false
 
-CONTEXT AWARENESS:
-- If workflowContext="awaiting_deal_confirmation" and user says yes/no/similar → ALWAYS delegate
-- If workflowContext="add_to_cart_with_deals" or "check_deals" → ALWAYS delegate
-- If pendingProduct exists → User is in middle of transaction, delegate
-- If dealStatus="pending" → User is considering a deal, delegate
+3. DELEGATE (grocery shopping requests):
+   - Products: search, browse, find items
+   - Deals: check, apply, inquire about savings
+   - Cart: add, remove, view, update
+   - Checkout: payment, order, delivery
+   - Context: ANY workflowContext is set OR pendingProduct exists → ALWAYS delegate
+   - Greetings: in shopping context → delegate
+
+4. DIRECT_RESPONSE (non-grocery):
+   - Weather, news, jokes, unrelated topics
+   - Provide helpful redirect in "task" field
 
 EXAMPLES:
-Input: "Find organic bananas"
-Output: {{"action": "delegate", "confidence": 1.0, "reasoning": "product search"}}
+{{"action": "delegate", "confidence": 1.0, "reasoning": "product search"}}
+// "Find organic bananas"
 
-Input: "Add milk to cart"
-Output: {{"action": "delegate", "confidence": 1.0, "reasoning": "cart operation", "autoApplyIntent": false}}
+{{"action": "delegate", "confidence": 1.0, "reasoning": "cart with auto-apply", "autoApplyIntent": true}}
+// "Add apples and use any deals"
 
-Input: "Add apples and just use any deals available"
-Output: {{"action": "delegate", "confidence": 1.0, "reasoning": "cart with auto-apply", "autoApplyIntent": true}}
+{{"action": "delegate", "confidence": 1.0, "reasoning": "deal confirmation", "autoApplyIntent": true}}
+// "yes" [when dealStatus=pending]
 
-Input: "If there's a deal on bananas, apply it and add to cart"
-Output: {{"action": "delegate", "confidence": 1.0, "reasoning": "conditional auto-apply", "autoApplyIntent": true}}
+{{"action": "delegate", "confidence": 1.0, "reasoning": "deal declined", "autoApplyIntent": false}}
+// "no thanks" [when awaiting_deal_confirmation]
 
-Input: "yes" [Context: awaiting_deal_confirmation=true]
-Output: {{"action": "delegate", "confidence": 1.0, "reasoning": "continuation - confirming deal", "autoApplyIntent": false}}
+{{"action": "direct_response", "confidence": 0.95, "reasoning": "unrelated", "task": "I help with grocery shopping. What would you like?"}}
+// "What's the weather?"
 
-Input: "no thanks" [Context: awaiting_deal_confirmation=true]
-Output: {{"action": "delegate", "confidence": 1.0, "reasoning": "continuation - declining deal", "autoApplyIntent": false}}
-
-Input: "Hello"
-Output: {{"action": "delegate", "confidence": 0.95, "reasoning": "greeting in shopping context", "autoApplyIntent": false}}
-
-Input: "What's the weather?"
-Output: {{"action": "direct_response", "confidence": 0.95, "reasoning": "unrelated to grocery", "task": "I can only help with grocery shopping. What would you like to add to your cart?"}}
-
-Be decisive: grocery-related OR continuation = delegate, not grocery-related = direct_response.`,
+Default: When in doubt, delegate with moderate confidence.`,
   ],
   ["placeholder", "{messages}"],
 ]);
 
 const planner = async (state: any) => {
   console.log("---PLANNER---");
-  const { messages, workflowContext, pendingProduct, dealData } = state;
+  
+  // Safety check for invalid state
+  if (!state || typeof state !== 'object') {
+    console.error('[planner] Invalid state received:', state);
+    return {
+      messages: [],
+      planningRecommendation: {
+        action: 'direct_response',
+        task: 'Hello! How can I help you today?',
+        reasoning: 'Invalid state - providing default response'
+      }
+    };
+  }
+  
+  const { messages: rawMessages, workflowContext, pendingProduct, dealData } = state;
+  
+  // CRITICAL FIX: Convert raw LangChain messages to AnnotatedMessage format
+  // This handles the case where LangGraph client sends standard messages directly
+  let messages = rawMessages;
+  if (Array.isArray(rawMessages) && rawMessages.length > 0) {
+    // Check if messages are already in AnnotatedMessage format
+    const firstMsg = rawMessages[0];
+    if (!firstMsg.role || !firstMsg.message) {
+      // Convert standard LangChain messages to AnnotatedMessage format
+      console.log('[planner] Converting standard messages to AnnotatedMessage format');
+      messages = rawMessages.map((msg, idx) => {
+        console.log(`[planner] Converting message ${idx}:`, {
+          type: msg?.type,
+          constructor: msg?.constructor?.name,
+          content: msg?.content?.toString().substring(0, 50)
+        });
+        
+        // Create proper AnnotatedMessage structure
+        if (msg.type === 'human' || msg.constructor?.name === 'HumanMessage') {
+          return {
+            message: msg,
+            role: 'user',
+            timestamp: Date.now()
+          };
+        }
+        if (msg.type === 'ai' || msg.constructor?.name === 'AIMessage') {
+          return {
+            message: msg,
+            role: 'assistant',
+            timestamp: Date.now()
+          };
+        }
+        if (msg.type === 'system' || msg.constructor?.name === 'SystemMessage') {
+          return {
+            message: msg,
+            role: 'system',
+            timestamp: Date.now()
+          };
+        }
+        
+        // Fallback: treat as user message
+        return {
+          message: msg,
+          role: 'user',
+          timestamp: Date.now()
+        };
+      });
+    }
+  }
   
   // Debug logging
   console.log(`[planner] Received state with ${Array.isArray(messages) ? messages.length : 0} messages`);
   console.log(`[planner] Context: workflowContext=${workflowContext}, pendingProduct=${!!pendingProduct}, dealData=${!!dealData}`);
   if (Array.isArray(messages) && messages.length > 0) {
     console.log(`[planner] First message type:`, messages[0]?.constructor?.name, messages[0]?.message?.constructor?.name);
+  }
+
+  // Detailed message inspection
+  console.log('[planner] === DETAILED MESSAGE INSPECTION ===');
+  if (Array.isArray(messages)) {
+    messages.forEach((msg, idx) => {
+      console.log(`[planner] Message ${idx}:`, {
+        hasMessage: !!msg?.message,
+        hasContent: !!(msg?.message && msg?.message.content),
+        role: msg?.role || 'undefined',
+        messageType: msg?.message?.constructor?.name || 'unknown',
+        content: msg?.message?.content ? String(msg?.message?.content).substring(0, 100) : 'no content',
+        fullMsgStructure: JSON.stringify(msg, null, 2).substring(0, 500)
+      });
+    });
+  } else {
+    console.log('[planner] Messages is not an array:', typeof messages, messages);
   }
 
   // Build context string for prompt
@@ -198,7 +263,10 @@ const planner = async (state: any) => {
   const userId = (state && state.userId) ? String((state as any).userId) : 'anon';
   const convId = (state && state.conversationId) ? String((state as any).conversationId) : 'global';
   const contextKey = `${contextString}:${pendingProductString}:${dealStatusString}`;
-  const key = `${userId}:${convId}:${contextKey}:${messages.slice(-6).map((m: any) => typeof m.message.content === 'string' ? m.message.content : JSON.stringify(m.message)).join('|')}`;
+  
+  // Safe message handling with null checks
+  const safeMessages = Array.isArray(messages) ? messages : [];
+  const key = `${userId}:${convId}:${contextKey}:${safeMessages.slice(-6).map((m: any) => typeof m.message?.content === 'string' ? m.message.content : JSON.stringify(m.message || m)).join('|')}`;
   const cached = getPlannerCache(key);
   if (cached) {
     console.log('[planner] Returning cached plan');
@@ -207,7 +275,7 @@ const planner = async (state: any) => {
 
   // Extract and validate messages for LLM prompt
   // Handle both annotated messages (with .message wrapper) and direct BaseMessage objects
-  const extractedMessages = messages.slice(-6).map((m: any) => {
+  const extractedMessages = safeMessages.slice(-6).map((m: any) => {
     // If it's already a BaseMessage, use it directly
     if (m && m.content !== undefined && (m.constructor?.name?.includes('Message') || m.lc_namespace)) {
       return m;
@@ -238,14 +306,22 @@ const planner = async (state: any) => {
       reasoning: 'No valid messages to analyze'
     };
     const normalized = new AIMessage(JSON.stringify(fallbackPlan));
+    
+    // Include converted messages if they exist
+    const messagesToReturn: any[] = [];
+    if (rawMessages !== messages && Array.isArray(messages)) {
+      messagesToReturn.push(...messages);
+    }
+    messagesToReturn.push({
+      message: normalized,
+      role: 'assistant',
+      agent: 'planner',
+      timestamp: Date.now(),
+      planningRecommendation: fallbackPlan,
+    });
+    
     return {
-      messages: [{
-        message: normalized,
-        role: 'assistant',
-        agent: 'planner',
-        timestamp: Date.now(),
-        planningRecommendation: fallbackPlan,
-      }],
+      messages: messagesToReturn,
     };
   }
 
@@ -281,14 +357,23 @@ const planner = async (state: any) => {
       reasoning: `LLM invocation error: ${invokeError.message}`
     };
     const normalized = new AIMessage(JSON.stringify(fallbackPlan));
+    
+    // Include converted messages if they exist
+    const messagesToReturn: any[] = [];
+    if (rawMessages !== messages && Array.isArray(messages)) {
+      messagesToReturn.push(...messages);
+    }
+    messagesToReturn.push({
+      message: normalized,
+      role: 'assistant',
+      agent: 'planner',
+      timestamp: Date.now(),
+      planningRecommendation: fallbackPlan,
+    });
+    
     return {
-      messages: [{
-        message: normalized,
-        role: 'assistant',
-        agent: 'planner',
-        timestamp: Date.now(),
-        planningRecommendation: fallbackPlan,
-      }],
+      messages: messagesToReturn,
+      plannerRecommendation: fallbackPlan,
     };
   }
 
@@ -403,19 +488,43 @@ const planner = async (state: any) => {
   // The planner only provides recommendations - supervisor handles all delegation
   const normalized = new AIMessage(JSON.stringify(finalPlan));
 
+  // CRITICAL FIX: Include converted user messages in the return payload
+  // If messages were converted from standard format to AnnotatedMessage format,
+  // we need to return them so they persist in the state for downstream agents
+  const messagesToReturn: any[] = [];
+  
+  // Only include converted messages if they were actually converted (rawMessages !== messages)
+  if (rawMessages !== messages && Array.isArray(messages)) {
+    console.log(`[planner] Including ${messages.length} converted messages in return payload`);
+    messagesToReturn.push(...messages);
+  }
+  
+  // Always add the planner's response
+  messagesToReturn.push({
+    message: normalized,
+    role: 'assistant',
+    agent: 'planner',
+    timestamp: Date.now(),
+    planningRecommendation: finalPlan, // Also stored in message metadata for compatibility
+  });
+
   const resultPayload = {
-    messages: [
-      {
-        message: normalized,
-        role: 'assistant',
-        agent: 'planner',
-        timestamp: Date.now(),
-        planningRecommendation: finalPlan, // Also stored in message metadata for compatibility
-      },
-    ],
+    messages: messagesToReturn,
     // CRITICAL: Return plannerRecommendation as top-level state field so it propagates through LangGraph
     plannerRecommendation: finalPlan,
+    // CRITICAL: Preserve ALL state fields from input to maintain workflow continuity
+    userId: state.userId,
+    conversationId: state.conversationId,
+    workflowContext: state.workflowContext,
+    pendingProduct: state.pendingProduct,
+    dealData: state.dealData,
+    cartData: state.cartData,
+    notificationData: state.notificationData,
+    delegationDepth: state.delegationDepth,
   };
+
+  console.log(`[planner] Returning ${messagesToReturn.length} messages total`);
+  console.log(`[planner] Preserving state: workflowContext=${state.workflowContext}, pendingProduct=${!!state.pendingProduct}, dealData=${!!state.dealData}`);
 
   // Cache the normalized planner output for short-term reuse
   try {

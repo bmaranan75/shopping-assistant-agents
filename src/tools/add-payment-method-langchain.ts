@@ -1,6 +1,6 @@
-import { tool } from "@langchain/core/tools";
-import { z } from "zod";
-import { withAsyncPaymentAuthorizationLangChain } from "../auth0-ai-langchain";
+import { StructuredTool, tool } from '@langchain/core/tools';
+import { z } from 'zod';
+import { withAsyncPaymentAuthorizationLangChain } from "../lib/auth0-ai-langchain";
 
 // Base LangChain tool for adding payment methods
 const baseTool = tool(
@@ -78,7 +78,7 @@ const baseTool = tool(
         );
       }
 
-      const responseData = await response.json();
+      const responseData = await response.json() as any;
       console.log("[add-payment-langchain] Response data:", responseData);
       if (!response.ok) {
         throw new Error(

@@ -5,7 +5,6 @@ import { z } from 'zod';
 import { addToCartTool } from '../tools/add-to-cart-langchain-structured';
 import { getCartTool } from '../tools/get-user-cart-langchain';
 import { createCheckoutCartTool, authorizedTracedCheckoutCartTool } from '../tools/checkout-langchain-refactored';
-import { withAsyncAuthorization } from '../ciba-provider';
 
 const date = new Date().toISOString();
 
