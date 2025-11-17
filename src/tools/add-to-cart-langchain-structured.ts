@@ -1,5 +1,6 @@
 import { DynamicStructuredTool } from '@langchain/core/tools';
 import { z } from 'zod';
+import { normalizeProductName } from '../agents/supervisor/product-utils';
 
 // Circuit breaker to prevent infinite tool calls
 const addToCartCallCounter = new Map<string, number>();
@@ -59,6 +60,10 @@ export const addToCartTool = (defaultUserId: string = 'default-user') => new Dyn
       // Use the structured input directly
       const { productCode, quantity = 1, userId } = input;
       
+      // ENHANCEMENT: Normalize product code to handle descriptors like "bag of apples" → "apple"
+      const normalizedProductCode = normalizeProductName(productCode);
+      console.log(`[addToCartTool] Normalized productCode: "${productCode}" → "${normalizedProductCode}"`);
+      
       // Circuit breaker to prevent infinite calls
       const sessionKey = `addToCart-${userId}`;
       const currentCount = addToCartCallCounter.get(sessionKey) || 0;
@@ -79,7 +84,7 @@ export const addToCartTool = (defaultUserId: string = 'default-user') => new Dyn
         addToCartCallCounter.delete(sessionKey);
       }, 60000);
       
-      console.log(`[addToCartTool] Processing: userId=${userId}, productCode=${productCode}, quantity=${quantity} (attempt ${currentCount + 1}/${MAX_ADD_TO_CART_CALLS})`);
+      console.log(`[addToCartTool] Processing: userId=${userId}, productCode=${normalizedProductCode} (original: ${productCode}), quantity=${quantity} (attempt ${currentCount + 1}/${MAX_ADD_TO_CART_CALLS})`);
       
       // Make API call to add item to cart
       const response = await fetch('http://localhost:3000/api/add-to-cart', {
@@ -88,7 +93,7 @@ export const addToCartTool = (defaultUserId: string = 'default-user') => new Dyn
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
-          productCode,
+          productCode: normalizedProductCode,  // Use normalized product code
           quantity,
           userId
         }),
@@ -97,10 +102,10 @@ export const addToCartTool = (defaultUserId: string = 'default-user') => new Dyn
       const data = await response.json();
       
       if (response.ok && data.success) {
-        console.log(`[addToCartTool] ✅ SUCCESS: Added ${quantity} x ${productCode} to cart for user ${userId}`);
+        console.log(`[addToCartTool] ✅ SUCCESS: Added ${quantity} x ${normalizedProductCode} to cart for user ${userId}`);
         return JSON.stringify({
           success: true,
-          message: `Successfully added ${quantity} x ${productCode} to cart`,
+          message: `Successfully added ${quantity} x ${normalizedProductCode} to cart`,
           cartItem: data.cartItem,
           total: data.cartItem?.totalPrice || 0
         });

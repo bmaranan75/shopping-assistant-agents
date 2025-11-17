@@ -10,9 +10,42 @@ import { ProductInfo } from './types';
  * This helps bridge the gap between how users speak and how products are stored
  */
 export function normalizeProductName(productName: string): string {
-  const normalized = productName.toLowerCase().trim();
+  let normalized = productName.toLowerCase().trim();
   
-  // Common plural to singular mappings for grocery items
+  // Step 1: Remove common descriptors and quantifiers
+  const descriptorsToRemove = [
+    'bag of', 'bags of',
+    'bunch of', 'bunches of',
+    'carton of', 'cartons of',
+    'box of', 'boxes of',
+    'pack of', 'packs of',
+    'package of', 'packages of',
+    'bottle of', 'bottles of',
+    'can of', 'cans of',
+    'jar of', 'jars of',
+    'container of', 'containers of',
+    'pound of', 'pounds of', 'lb of', 'lbs of',
+    'gallon of', 'gallons of',
+    'quart of', 'quarts of',
+    'pint of', 'pints of',
+    'dozen', 'a dozen',
+    'piece of', 'pieces of',
+    'head of', 'heads of',
+    'loaf of', 'loaves of'
+  ];
+  
+  for (const descriptor of descriptorsToRemove) {
+    if (normalized.startsWith(descriptor + ' ')) {
+      normalized = normalized.substring(descriptor.length + 1).trim();
+      console.log(`[normalizeProductName] Removed descriptor "${descriptor}" from "${productName}"`);
+      break;
+    }
+  }
+  
+  // Step 2: Remove articles (a, an, the) from the beginning
+  normalized = normalized.replace(/^(a|an|the)\s+/, '');
+  
+  // Step 3: Common plural to singular mappings for grocery items
   const pluralToSingular: { [key: string]: string } = {
     'apples': 'apple',
     'bananas': 'banana', 

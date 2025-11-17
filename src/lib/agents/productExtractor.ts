@@ -34,7 +34,19 @@ export default async function extractProductInfo(
   }
 
   try {
-    const prompt = `Extract product information from the following text and return a JSON object with "product" (string) and "quantity" (number) fields. If you cannot extract valid product information, return "null".
+    const prompt = `Extract product information from the following text and return a JSON object with "product" (string) and "quantity" (number) fields.
+
+IMPORTANT: For the "product" field, extract ONLY the core product name, removing:
+- Descriptors like "bag of", "bunch of", "carton of", "box of", etc.
+- Articles like "a", "an", "the"
+- Keep the product name simple (e.g., "bag of apples" should be "apples", "carton of milk" should be "milk")
+
+Examples:
+- "add a bag of apples" → {"product": "apples", "quantity": 1}
+- "add 2 bunches of bananas" → {"product": "bananas", "quantity": 2}
+- "add a carton of milk" → {"product": "milk", "quantity": 1}
+
+If you cannot extract valid product information, return "null".
 
 Text: ${content}
 
