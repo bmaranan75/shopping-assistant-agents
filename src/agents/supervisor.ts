@@ -219,11 +219,48 @@ export async function detectContinuationIntent(
 async function supervisor(state: typeof SupervisorState.State) {
   const { messages, userId, conversationId, cartData, workflowContext, dealData, pendingProduct, plannerRecommendation } = state as any;
   
-  console.log('[supervisor] === RECEIVED STATE ===');
+  console.log('[supervisor] ========================================');
+  console.log('[supervisor] === INCOMING REQUEST - FULL STATE ===');
+  console.log('[supervisor] ========================================');
+  console.log('[supervisor] Raw state keys:', Object.keys(state));
+  console.log('[supervisor] userId:', userId);
+  console.log('[supervisor] conversationId:', conversationId);
+  console.log('[supervisor] workflowContext:', workflowContext);
+  console.log('[supervisor] cartData:', JSON.stringify(cartData, null, 2));
+  console.log('[supervisor] dealData:', JSON.stringify(dealData, null, 2));
+  console.log('[supervisor] pendingProduct:', JSON.stringify(pendingProduct, null, 2));
+  console.log('[supervisor] plannerRecommendation:', JSON.stringify(plannerRecommendation, null, 2));
   console.log('[supervisor] Total messages:', Array.isArray(messages) ? messages.length : 0);
+  
   if (Array.isArray(messages)) {
+    console.log('[supervisor] === MESSAGE DETAILS ===');
+    messages.forEach((msg, idx) => {
+      let contentPreview = 'N/A';
+      if (msg.message?.content !== undefined) {
+        if (typeof msg.message.content === 'string') {
+          contentPreview = msg.message.content.substring(0, 100);
+        } else {
+          const stringified = JSON.stringify(msg.message.content);
+          contentPreview = stringified ? stringified.substring(0, 100) : 'null';
+        }
+      }
+      
+      console.log(`[supervisor] Message ${idx}:`, {
+        role: msg.role,
+        agent: msg.agent,
+        hasMessage: !!msg.message,
+        messageType: msg.message?.constructor?.name,
+        contentType: typeof msg.message?.content,
+        content: contentPreview,
+        timestamp: msg.timestamp,
+        delegation: msg.delegation,
+        progress: msg.progress,
+        planningRecommendation: msg.planningRecommendation
+      });
+    });
+    
     const userMessages = messages.filter(m => m.role === 'user');
-    console.log('[supervisor] User messages:', userMessages.length);
+    console.log('[supervisor] User messages count:', userMessages.length);
     if (userMessages.length > 0) {
       const latestUser = userMessages[userMessages.length - 1];
       const content = typeof latestUser.message?.content === 'string' 
@@ -232,7 +269,7 @@ async function supervisor(state: typeof SupervisorState.State) {
       console.log('[supervisor] Latest user message:', content);
     }
   }
-  console.log('[supervisor] Context:', { workflowContext, userId, conversationId, hasPendingProduct: !!pendingProduct });
+  console.log('[supervisor] ========================================');
   
   // Detect if this is an agent completion (agent returned to supervisor) or initial routing
   const lastMessage = Array.isArray(messages) && messages.length > 0 ? messages[messages.length - 1] : undefined;

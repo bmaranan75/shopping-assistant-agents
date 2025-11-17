@@ -74,13 +74,13 @@ npm run build
 
 ## Environment Variables
 
-| Variable | Description | Required |
-|----------|-------------|----------|
-| `OPENAI_API_KEY` | OpenAI API key | Yes |
-| `SAFEWAY_API_KEY` | Safeway API key | Yes |
-| `NEXTJS_URL` | Chat app URL for callbacks | Yes |
-| `LANGCHAIN_TRACING_V2` | Enable LangSmith tracing | No |
-| `LANGCHAIN_API_KEY` | LangSmith API key | No |
+| Variable               | Description                | Required |
+| ---------------------- | -------------------------- | -------- |
+| `OPENAI_API_KEY`       | OpenAI API key             | Yes      |
+| `SAFEWAY_API_KEY`      | Safeway API key            | Yes      |
+| `NEXTJS_URL`           | Chat app URL for callbacks | Yes      |
+| `LANGCHAIN_TRACING_V2` | Enable LangSmith tracing   | No       |
+| `LANGCHAIN_API_KEY`    | LangSmith API key          | No       |
 
 ## Available Graphs
 
@@ -89,14 +89,55 @@ npm run build
 - `cart_and_checkout` - Cart management
 - `payment` - Payment operations
 - `deals` - Promotions and deals
+- `health` - System health monitoring and diagnostics
 
 ## API
 
 LangGraph server exposes standard endpoints:
 
-- `POST /threads` - Create conversation thread
-- `POST /threads/{thread_id}/runs/stream` - Stream agent execution
-- `GET /health` - Health check
+- `POST /runs` - Create and run agent conversations
+- `GET /runs/{run_id}/wait` - Get conversation results
+- `GET /ok` - Basic health check
+
+### Health Monitoring
+
+The system provides health monitoring through two mechanisms:
+
+#### `/ok` - Simple Health Check
+
+```bash
+curl http://localhost:2024/ok
+# Response: {"ok": true}
+```
+
+#### Health Agent - Comprehensive Health Monitoring
+
+```bash
+curl -X POST http://localhost:2024/runs \
+  -H "Content-Type: application/json" \
+  -d '{
+    "assistant_id": "health",
+    "input": {
+      "messages": [{"type": "human", "content": "Check system health"}]
+    }
+  }'
+# Returns run_id, then poll /runs/{run_id}/wait for results
+```
+
+**Health Agent Queries:**
+
+- `"Check system health"` - Overall status
+- `"Show system metrics"` - Performance data
+- `"Check [agent] agent status"` - Specific agent health
+- `"Run comprehensive health check"` - Detailed diagnostics
+
+### Testing Health Monitoring
+
+Use the provided test script to validate health functionality:
+
+```bash
+./test-health-fixed.sh
+```
 
 ## License
 

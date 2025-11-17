@@ -48,6 +48,11 @@ export function buildAgentContextMessage(
   const deduped: AnnotatedMessage[] = [];
   for (let i = filtered.length - 1; i >= 0; i--) {
     const m = filtered[i];
+    // CRITICAL FIX: Validate message exists before accessing content
+    if (!m || !m.message) {
+      console.warn('[buildAgentContextMessage] Skipping invalid message at index', i, ':', m);
+      continue;
+    }
     const content = typeof m.message.content === 'string' ? m.message.content : JSON.stringify(m.message.content);
     if (!seen.has(content)) {
       seen.add(content);
@@ -60,10 +65,15 @@ export function buildAgentContextMessage(
 
   // Compose lines with agent/source annotation to help the LLM quickly contextualize
   const lines = recent.map(m => {
+    // CRITICAL FIX: Additional safety check
+    if (!m || !m.message) {
+      console.warn('[buildAgentContextMessage] Skipping invalid message in recent:', m);
+      return '';
+    }
     const content = typeof m.message.content === 'string' ? m.message.content : JSON.stringify(m.message.content);
     const src = m.role === 'assistant' ? (m.agent || 'assistant') : (m.role === 'system' ? 'system' : 'user');
     return `${src.toUpperCase()}: ${content}`;
-  });
+  }).filter(line => line !== ''); // Remove empty lines from invalid messages
 
   // Add the current user message at the end (most relevant) only if it's not already present
   const alreadyPresent = lines.some(l => l.includes(currentUserMessage));

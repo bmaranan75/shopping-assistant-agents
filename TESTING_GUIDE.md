@@ -9,6 +9,7 @@ You'll need to complete these steps before the agents server can run:
 ### 1. Install Node.js and npm
 
 If not already installed, you need Node.js 20+ and npm. Check with:
+
 ```bash
 node --version  # Should show v20.x.x or higher
 npm --version   # Should show 10.x.x or higher
@@ -56,6 +57,7 @@ HOST=0.0.0.0
 ```
 
 **Important Notes:**
+
 - You MUST have a valid `OPENAI_API_KEY` for the agents to work
 - `SAFEWAY_API_KEY` can be a mock value for testing
 - `NEXTJS_URL` will be used by tools to make HTTP callbacks (not needed for basic testing)
@@ -72,6 +74,7 @@ npm install
 ```
 
 This will install:
+
 - `@langchain/langgraph` - Agent orchestration
 - `@langchain/openai` - OpenAI integration
 - `@langchain/core` - LangChain core
@@ -79,6 +82,7 @@ This will install:
 - And other dependencies
 
 **Expected output:**
+
 ```
 added 150+ packages in 30s
 ```
@@ -92,11 +96,13 @@ npm run dev
 ```
 
 **What this does:**
+
 - Starts the LangGraph development server
 - Exposes all 5 graphs defined in `langgraph.json`
 - Listens on port 2024
 
 **Expected output:**
+
 ```
 🚀 LangGraph Studio is running at http://localhost:2024
 Available graphs:
@@ -118,10 +124,42 @@ Available graphs:
 curl http://localhost:2024/ok
 
 # Expected response:
-# {"ok": true}
+# {"ok": true, "timestamp": 1699123456789}
 ```
 
-### Test 2: List Available Graphs
+### Test 2: Check Comprehensive Health
+
+```bash
+# Test the new comprehensive health endpoint
+curl http://localhost:2024/health
+
+# Expected response: Detailed JSON with all agent statuses
+```
+
+### Test 3: Check FastMCP Health
+
+```bash
+# Test FastMCP-compatible health endpoint
+curl http://localhost:2024/health/fastmcp
+
+# Expected response: FastMCP format with dependencies status
+```
+
+### Test 4: Test Health Agent Graph
+
+```bash
+# Test interactive health monitoring
+curl -X POST http://localhost:2024/health/invoke \
+  -H "Content-Type: application/json" \
+  -d '{
+    "input": {
+      "messages": [{"type": "human", "content": "Check system health"}]
+    },
+    "config": {"configurable": {"thread_id": "health-test-123"}}
+  }'
+```
+
+### Test 5: List Available Graphs
 
 ```bash
 curl http://localhost:2024/threads
@@ -130,7 +168,16 @@ curl http://localhost:2024/threads
 # []
 ```
 
-### Test 3: Test Simple Graph Invocation
+### Test 6: Run Health Test Script
+
+```bash
+# Use the comprehensive health test script
+./test-health.sh
+
+# This will test all health endpoints and provide a detailed report
+```
+
+### Test 7: Test Simple Graph Invocation
 
 Let's test the catalog agent directly:
 
@@ -159,6 +206,7 @@ curl -X POST "http://localhost:2024/threads/{thread_id}/runs/stream" \
 ```
 
 **Expected behavior:**
+
 - Should start processing
 - May fail with tool errors (because NEXTJS_URL tools need the chat app running)
 - But should show the agent is working and trying to call tools
@@ -197,6 +245,7 @@ const tools = []; // Remove actual tools for testing
 For a complete test, you need BOTH services running:
 
 ### Terminal 1: Start Agents Server
+
 ```bash
 cd /Users/bmara00/GithubPersonal/shopping-assistant-agents
 npm run dev
@@ -204,6 +253,7 @@ npm run dev
 ```
 
 ### Terminal 2: Start Chat App (Original Repo)
+
 ```bash
 cd /Users/bmara00/GithubPersonal/auth0-genai-nextjs-langchain
 # First, install dependencies if not already done
@@ -214,6 +264,7 @@ npm run dev
 ```
 
 ### Terminal 3: Test the Integration
+
 ```bash
 # Test catalog search via chat app
 curl -X POST http://localhost:3000/api/chat \
@@ -227,26 +278,30 @@ curl -X POST http://localhost:3000/api/chat \
 
 ## 📊 What Each Test Validates
 
-| Test | What It Checks | Requires |
-|------|---------------|----------|
-| Server Health | LangGraph server is running | npm install |
-| List Graphs | Configuration is valid | npm install |
-| Graph Invocation | Agents can process messages | OpenAI key |
-| Tool Execution | Tools can callback to Next.js | Both services |
-| Full Flow | Complete end-to-end | Both services + Auth |
+| Test             | What It Checks                | Requires             |
+| ---------------- | ----------------------------- | -------------------- |
+| Server Health    | LangGraph server is running   | npm install          |
+| List Graphs      | Configuration is valid        | npm install          |
+| Graph Invocation | Agents can process messages   | OpenAI key           |
+| Tool Execution   | Tools can callback to Next.js | Both services        |
+| Full Flow        | Complete end-to-end           | Both services + Auth |
 
 ---
 
 ## ❌ Common Issues
 
 ### Issue 1: "npm: command not found"
+
 **Solution:** Install Node.js from https://nodejs.org/
 
 ### Issue 2: "OpenAI API key not valid"
+
 **Solution:** Check your `.env` file has the correct key starting with `sk-proj-` or `sk-`
 
 ### Issue 3: "Port 2024 already in use"
-**Solution:** 
+
+**Solution:**
+
 ```bash
 # Find what's using the port
 lsof -i :2024
@@ -255,9 +310,11 @@ kill -9 <PID>
 ```
 
 ### Issue 4: "Tool failed to execute"
+
 **Solution:** This is expected if chat app isn't running. Tools need `NEXTJS_URL` to be accessible.
 
 ### Issue 5: "Cannot find module"
+
 **Solution:** Re-run `npm install` to ensure all dependencies are installed
 
 ---
@@ -269,6 +326,9 @@ kill -9 <PID>
 - [ ] Dependencies installed (`npm install`)
 - [ ] Server starts successfully (`npm run dev`)
 - [ ] Server health check passes (`curl http://localhost:2024/ok`)
+- [ ] Comprehensive health check works (`curl http://localhost:2024/health`)
+- [ ] FastMCP health check works (`curl http://localhost:2024/health/fastmcp`)
+- [ ] Health agent graph responds (`./test-health.sh`)
 - [ ] Can list graphs
 - [ ] Optional: Chat app running for full test
 
@@ -279,6 +339,7 @@ kill -9 <PID>
 Once testing is successful:
 
 1. **Phase 2:** Clean up the chat repository
+
    ```bash
    cd /Users/bmara00/GithubPersonal/auth0-genai-nextjs-langchain
    ./scripts/cleanup-chat-repo.sh

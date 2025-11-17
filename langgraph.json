@@ -5,7 +5,8 @@
     "catalog": "./src/agents/catalog-agent.ts:catalogGraph",
     "cart_and_checkout": "./src/agents/cart-and-checkout-agent.ts:cartAndCheckoutGraph",
     "payment": "./src/agents/payment-agent.ts:paymentGraph",
-    "deals": "./src/agents/deals-agent.ts:dealsGraph"
+    "deals": "./src/agents/deals-agent.ts:dealsGraph",
+    "health": "./src/agents/health-agent.ts:healthGraph"
   },
   "env": ".env",
   "node_version": "20"
